@@ -8,6 +8,11 @@ vars:
   bin: "{{.PWD}}/bin"
   app: "keyprox"
   app_bin: "{{.bin}}/{{.app}}"
+  repo_name:
+    sh: basename "{{.PWD}}"
+  release_goos: "linux"
+  release_goarch: "amd64"
+  release_linux_archive: "{{.bin}}/{{.repo_name}}_{{.release_goos}}_{{.release_goarch}}.tar.gz"
 
 env:
   CGO_ENABLED: 0
@@ -24,6 +29,9 @@ tasks:
     desc: build keyprox binary
     deps:
       - setup
+    env:
+      GOOS: "{{.release_goos}}"
+      GOARCH: "{{.release_goarch}}"
     cmds:
       - '{{.gobin}} build -tags netgo -ldflags="{{.ldflags}}" -trimpath -gcflags="{{.gcflags}}" -asmflags="{{.asmflags}}" -o {{.app_bin}} ./cmd/{{.app}}'
 
@@ -31,3 +39,13 @@ tasks:
     desc: run go tests
     cmds:
       - "{{.gobin}} test ./..."
+
+  release:
+    desc: build and publish github release
+    deps:
+      - build
+    cmds:
+      - "tar -czf {{.release_linux_archive}} -C {{.bin}} {{.app}}"
+      - |
+        TAG=$(date +v%m.%d.%H)
+        gh release create "$TAG" {{.release_linux_archive}}
