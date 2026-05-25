@@ -1,0 +1,33 @@
+version: "3"
+
+vars:
+  gobin: go
+  ldflags: "-extldflags '-static' -w -s -buildid="
+  gcflags: "all=-trimpath={{.PWD}} -dwarf=false -l"
+  asmflags: "all=-trimpath={{.PWD}}"
+  bin: "{{.PWD}}/bin"
+  app: "keyprox"
+  app_bin: "{{.bin}}/{{.app}}"
+
+env:
+  CGO_ENABLED: 0
+
+tasks:
+  setup:
+    desc: set up the environment
+    internal: true
+    silent: true
+    cmds:
+      - "mkdir -p {{.bin}}"
+
+  build:
+    desc: build keyprox binary
+    deps:
+      - setup
+    cmds:
+      - '{{.gobin}} build -tags netgo -ldflags="{{.ldflags}}" -trimpath -gcflags="{{.gcflags}}" -asmflags="{{.asmflags}}" -o {{.app_bin}} ./cmd/{{.app}}'
+
+  test:
+    desc: run go tests
+    cmds:
+      - "{{.gobin}} test ./..."
