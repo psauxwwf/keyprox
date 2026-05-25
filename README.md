@@ -8,7 +8,7 @@ The proxy accepts a regular OpenAI-compatible request on the local `/v1/...` end
 
 - detects the provider from the `provider` prefix;
 - strips that prefix from `model` before forwarding upstream;
-- resolves the provider's upstream endpoint from the internal catalog;
+- resolves the provider endpoint from the saved config;
 - picks the provider API key using round-robin;
 - proxies the response back to the client, including streaming responses.
 
@@ -16,13 +16,15 @@ Example:
 
 - input: `model: "zai/glm-5.1"`
 - upstream request: `model: "glm-5.1"`
-- the API key is taken from `provider.zai`
+- the API key is taken from `provider.zai.keys`
+- the upstream base URL is taken from `provider.zai.endpoints`
 
 ## Why it exists
 
 The project is useful when you need to:
 
 - expose a single local OpenAI-compatible endpoint for multiple providers;
+- keep provider endpoints and keys in one editable config file;
 - rotate keys for one provider without changing the client;
 - survive per-key rate limits;
 - use one local base URL in tools such as OpenCode.
@@ -54,9 +56,12 @@ runtime:
   log: ""
 provider:
   zai:
-    - key-1
-    - key-2
-    - key-3
+    endpoints:
+      - https://api.z.ai/api/coding/paas/v4
+    keys:
+      - key-1
+      - key-2
+      - key-3
 ```
 
 ### Runtime fields
@@ -69,16 +74,51 @@ provider:
 
 ### Provider fields
 
-`provider` is a map of `provider_id -> [api_key1, api_key2, ...]`.
+`provider` is a map of `provider_id -> provider_config`.
 
-The provider ID must match the prefix used in `model` and must exist in the internal endpoint catalog.
+Each provider entry may contain:
 
-## Provider catalog
+- `endpoints` — upstream base URLs; the proxy currently uses the first endpoint in the list;
+- `keys` — API keys for round-robin and 429 retry fallback;
+- `default_headers` — optional headers copied from the provider catalog and sent on every upstream request.
 
-Supported upstream endpoints are loaded from the internal catalog in `internal/proxy/endpoints.go`.
-The catalog is built from the snapshot in `opencode-providers-endpoints.md` and is used only for providers with a statically resolvable HTTP endpoint.
+The provider ID must match the prefix used in `model`.
+
+Providers with an empty `keys` list are treated as disabled. This is important because the generated default config contains all supported providers but no secrets.
+
+## Default config generation
+
+If the config file does not exist and you run:
+
+```bash
+./bin/keyprox --save
+```
+
+`keyprox` loads the provider catalog from Catwalk, keeps only providers with static HTTP endpoints, and writes all of them into `keyprox.yaml`.
+
+The generated file contains:
+
+- the runtime defaults;
+- every supported provider ID;
+- each provider's upstream endpoint list;
+- any provider default headers;
+- empty `keys: []` lists.
+
+After the file has been created, runtime provider information is loaded from the saved config instead of querying Catwalk on startup.
+
+## Provider catalog source
+
+The generated default provider list comes from Catwalk via `internal/proxy/endpoints.go`.
+Live Catwalk provider data: https://catwalk.charm.land/v2/providers
+The repository also keeps `opencode-providers-endpoints.md` as a snapshot reference.
 
 ## Running
+
+Build the binary:
+
+```bash
+task build
+```
 
 Generate a config with defaults:
 
@@ -86,11 +126,7 @@ Generate a config with defaults:
 ./bin/keyprox --save
 ```
 
-Build the binary:
-
-```bash
-task build
-```
+Edit `keyprox.yaml` and fill keys only for the providers you want to enable.
 
 Run the server:
 

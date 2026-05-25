@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,19 +30,14 @@ var (
 			Level:              "info",
 			Log:                "",
 		},
-		Provider: ProviderKeys{
-			"zai": {
-				"replace-with-real-key-1",
-				"replace-with-real-key-2",
-			},
-		},
+		Provider: make(Providers),
 	}
 	ErrNotExists = fmt.Errorf("config not found: %w", os.ErrNotExist)
 )
 
 type Config struct {
-	Runtime  Runtime      `yaml:"runtime"`
-	Provider ProviderKeys `yaml:"provider"`
+	Runtime  Runtime   `yaml:"runtime"`
+	Provider Providers `yaml:"provider"`
 }
 
 type Runtime struct {
@@ -51,15 +48,25 @@ type Runtime struct {
 	Log                string        `yaml:"log"`
 }
 
-type ProviderKeys map[string][]string
+type ProviderConfig struct {
+	Endpoints      []string          `yaml:"endpoints"`
+	DefaultHeaders map[string]string `yaml:"default_headers,omitempty"`
+	Keys           []string          `yaml:"keys"`
+}
+
+type Providers map[string]ProviderConfig
 
 func Default() Config {
 	cfg := Config{
 		Runtime: defaultConfig.Runtime,
 	}
-	if defaultConfig.Provider != nil {
-		cfg.Provider = cloneProviderKeys(defaultConfig.Provider)
-	}
+	cfg.Provider = cloneProviders(defaultConfig.Provider)
+	return cfg
+}
+
+func DefaultWithProviders(providers Providers) Config {
+	cfg := Default()
+	cfg.Provider = cloneProviders(providers)
 	return cfg
 }
 
@@ -113,22 +120,33 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf("runtime.level must not be empty")
 	}
 	if len(cfg.Provider) == 0 {
-		return fmt.Errorf("provider must define at least one provider key list")
+		return fmt.Errorf("provider must define at least one provider entry")
 	}
 
-	for provider, keys := range cfg.Provider {
-		if provider == "" {
+	for providerID, provider := range cfg.Provider {
+		if providerID == "" {
 			return fmt.Errorf("provider id must not be empty")
 		}
-		if len(keys) == 0 {
-			return fmt.Errorf("provider %q has no keys", provider)
+		if len(provider.Keys) == 0 {
+			continue
 		}
-		for _, key := range keys {
+		if len(provider.Endpoints) == 0 {
+			return fmt.Errorf("provider %q must define at least one endpoint when keys are configured", providerID)
+		}
+		for _, endpoint := range provider.Endpoints {
+			if endpoint == "" {
+				return fmt.Errorf("provider %q contains an empty endpoint", providerID)
+			}
+			if err := validateEndpoint(endpoint); err != nil {
+				return fmt.Errorf("provider %q endpoint %q: %w", providerID, endpoint, err)
+			}
+		}
+		for _, key := range provider.Keys {
 			if key == "" {
-				return fmt.Errorf("provider %q contains an empty key", provider)
+				return fmt.Errorf("provider %q contains an empty key", providerID)
 			}
 			if strings.HasPrefix(key, "replace-with-real-key") {
-				return fmt.Errorf("provider %q still uses the example key %q", provider, key)
+				return fmt.Errorf("provider %q still uses the example key %q", providerID, key)
 			}
 		}
 	}
@@ -139,6 +157,18 @@ func (cfg *Config) Validate() error {
 func (cfg Config) ProviderIDs() []string {
 	providers := make([]string, 0, len(cfg.Provider))
 	for provider := range cfg.Provider {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	return providers
+}
+
+func (cfg Config) EnabledProviderIDs() []string {
+	providers := make([]string, 0, len(cfg.Provider))
+	for provider, providerCfg := range cfg.Provider {
+		if len(providerCfg.Keys) == 0 {
+			continue
+		}
 		providers = append(providers, provider)
 	}
 	sort.Strings(providers)
@@ -167,7 +197,7 @@ func save(cfg *Config, filename string) error {
 	}
 
 	normalized := *cfg
-	normalized.Provider = cloneProviderKeys(cfg.Provider)
+	normalized.Provider = cloneProviders(cfg.Provider)
 	normalize(&normalized)
 	applyDefaults(&normalized)
 
@@ -198,7 +228,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Runtime.Level = defaultConfig.Runtime.Level
 	}
 	if cfg.Provider == nil {
-		cfg.Provider = make(ProviderKeys)
+		cfg.Provider = make(Providers)
 	}
 }
 
@@ -206,36 +236,101 @@ func normalize(cfg *Config) {
 	cfg.Runtime.Listen = strings.TrimSpace(cfg.Runtime.Listen)
 	cfg.Runtime.Level = strings.TrimSpace(cfg.Runtime.Level)
 	cfg.Runtime.Log = strings.TrimSpace(cfg.Runtime.Log)
-	cfg.Provider = normalizeProviderKeys(cfg.Provider)
+	cfg.Provider = normalizeProviders(cfg.Provider)
 }
 
-func normalizeProviderKeys(src ProviderKeys) ProviderKeys {
+func normalizeProviders(src Providers) Providers {
 	if len(src) == 0 {
-		return make(ProviderKeys)
+		return make(Providers)
 	}
 
-	dst := make(ProviderKeys, len(src))
-	for provider, keys := range src {
-		normalizedProvider := normalizeProviderID(provider)
-		normalizedKeys := make([]string, 0, len(keys))
-		for _, key := range keys {
-			normalizedKeys = append(normalizedKeys, strings.TrimSpace(key))
+	dst := make(Providers, len(src))
+	for providerID, provider := range src {
+		dst[normalizeProviderID(providerID)] = ProviderConfig{
+			Endpoints:      normalizeStrings(provider.Endpoints),
+			DefaultHeaders: normalizeStringMap(provider.DefaultHeaders),
+			Keys:           normalizeStrings(provider.Keys),
 		}
-		dst[normalizedProvider] = append(dst[normalizedProvider], normalizedKeys...)
 	}
 	return dst
 }
 
-func cloneProviderKeys(src ProviderKeys) ProviderKeys {
+func cloneProviders(src Providers) Providers {
 	if len(src) == 0 {
-		return make(ProviderKeys)
+		return make(Providers)
 	}
 
-	dst := make(ProviderKeys, len(src))
-	for provider, keys := range src {
-		dst[provider] = append([]string(nil), keys...)
+	dst := make(Providers, len(src))
+	for providerID, provider := range src {
+		dst[providerID] = ProviderConfig{
+			Endpoints:      cloneStrings(provider.Endpoints),
+			DefaultHeaders: cloneStringMap(provider.DefaultHeaders),
+			Keys:           cloneStrings(provider.Keys),
+		}
 	}
 	return dst
+}
+
+func normalizeStrings(src []string) []string {
+	if len(src) == 0 {
+		return []string{}
+	}
+
+	dst := make([]string, 0, len(src))
+	for _, value := range src {
+		dst = append(dst, strings.TrimSpace(value))
+	}
+	return dst
+}
+
+func cloneStrings(src []string) []string {
+	if len(src) == 0 {
+		return []string{}
+	}
+	return append([]string(nil), src...)
+}
+
+func normalizeStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		dst[trimmedKey] = strings.TrimSpace(value)
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+
+	dst := make(map[string]string, len(src))
+	maps.Copy(dst, src)
+	return dst
+}
+
+func validateEndpoint(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("invalid HTTP endpoint")
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("invalid HTTP endpoint")
+	}
+	return nil
 }
 
 func normalizeProviderID(provider string) string {

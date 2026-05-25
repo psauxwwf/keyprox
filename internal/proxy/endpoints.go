@@ -8,6 +8,8 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/catwalk/pkg/embedded"
+
+	"keyprox/pkg/config"
 )
 
 type ProviderCatalogEntry struct {
@@ -21,9 +23,9 @@ var supportedCatwalkProviderTypes = map[catwalk.Type]struct{}{
 	catwalk.TypeOpenRouter:   {},
 }
 
-func LoadCatalog() (map[string]ProviderCatalogEntry, error) {
+func LoadProviderDefaults() (config.Providers, error) {
 	providers := embedded.GetAll()
-	catalog := make(map[string]ProviderCatalogEntry, len(providers))
+	defaults := make(config.Providers, len(providers))
 	for _, provider := range providers {
 		if !supportsOpenAIProxy(provider) {
 			continue
@@ -34,15 +36,37 @@ func LoadCatalog() (map[string]ProviderCatalogEntry, error) {
 			continue
 		}
 
-		entry, err := newProviderCatalogEntry(rawURL, provider.DefaultHeaders)
-		if err != nil {
-			return nil, fmt.Errorf("provider %q endpoint %q: %w", provider.ID, rawURL, err)
+		defaults[normalizeProviderID(string(provider.ID))] = config.ProviderConfig{
+			Endpoints:      []string{rawURL},
+			DefaultHeaders: cloneStringMap(provider.DefaultHeaders),
+			Keys:           []string{},
 		}
-		catalog[normalizeProviderID(string(provider.ID))] = entry
 	}
 
-	if len(catalog) == 0 {
+	if len(defaults) == 0 {
 		return nil, fmt.Errorf("catwalk embedded catalog contains no compatible providers with static endpoints")
+	}
+
+	return defaults, nil
+}
+
+func LoadCatalog() (map[string]ProviderCatalogEntry, error) {
+	defaults, err := LoadProviderDefaults()
+	if err != nil {
+		return nil, err
+	}
+
+	catalog := make(map[string]ProviderCatalogEntry, len(defaults))
+	for providerID, provider := range defaults {
+		if len(provider.Endpoints) == 0 {
+			return nil, fmt.Errorf("provider %q has no endpoints", providerID)
+		}
+
+		entry, err := newProviderCatalogEntry(provider.Endpoints[0], provider.DefaultHeaders)
+		if err != nil {
+			return nil, fmt.Errorf("provider %q endpoint %q: %w", providerID, provider.Endpoints[0], err)
+		}
+		catalog[providerID] = entry
 	}
 
 	return catalog, nil
@@ -66,14 +90,6 @@ func newProviderCatalogEntry(rawURL string, defaultHeaders map[string]string) (P
 		BaseURL:        parsed,
 		DefaultHeaders: cloneStringMap(defaultHeaders),
 	}, nil
-}
-
-func mustNewProviderCatalogEntry(rawURL string, defaultHeaders map[string]string) ProviderCatalogEntry {
-	entry, err := newProviderCatalogEntry(rawURL, defaultHeaders)
-	if err != nil {
-		panic(err)
-	}
-	return entry
 }
 
 func cloneStringMap(src map[string]string) map[string]string {

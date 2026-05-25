@@ -66,9 +66,7 @@ func newExitError(code int, err error) error {
 	return &ExitError{code: code, err: err}
 }
 
-func rootCmd(run func(*config.Config, map[string]proxy.ProviderCatalogEntry) error) *cobra.Command {
-	defaults := config.Default()
-
+func rootCmd(run func(*config.Config) error) *cobra.Command {
 	var (
 		saveConf bool
 		confPath = "keyprox.yaml"
@@ -84,7 +82,11 @@ func rootCmd(run func(*config.Config, map[string]proxy.ProviderCatalogEntry) err
 			loaded, err := config.New(confPath)
 			if err != nil {
 				if errors.Is(err, config.ErrNotExists) && saveConf {
-					cfgCopy := defaults
+					providerDefaults, loadErr := proxy.LoadProviderDefaults()
+					if loadErr != nil {
+						return newExitError(initCode, loadErr)
+					}
+					cfgCopy := config.DefaultWithProviders(providerDefaults)
 					cfg = &cfgCopy
 				} else {
 					return newExitError(initCode, err)
@@ -104,14 +106,7 @@ func rootCmd(run func(*config.Config, map[string]proxy.ProviderCatalogEntry) err
 				return nil
 			}
 
-			catalog, err := proxy.LoadCatalog()
-			if err != nil {
-				return newExitError(initCode, err)
-			}
 			if err := cfg.Validate(); err != nil {
-				return newExitError(initCode, err)
-			}
-			if err := validateConfiguredProviders(*cfg, catalog); err != nil {
 				return newExitError(initCode, err)
 			}
 
@@ -121,19 +116,17 @@ func rootCmd(run func(*config.Config, map[string]proxy.ProviderCatalogEntry) err
 				"log", cfg.Runtime.Log,
 				"providers", configuredProviders(*cfg),
 			)
-			return newExitError(fatalCode, run(cfg, catalog))
+			return newExitError(fatalCode, run(cfg))
 		},
 	}
 
 	cmd.Flags().StringVar(&confPath, "config", "keyprox.yaml", "path to config file")
 	cmd.Flags().BoolVar(&saveConf, "save", false, "save resolved config to --config and exit")
-
-	_ = defaults
 	return cmd
 }
 
-func runProxyServer(cfg *config.Config, catalog map[string]proxy.ProviderCatalogEntry) error {
-	proxyHandler, err := proxy.NewProxy(*cfg, catalog, &http.Client{})
+func runProxyServer(cfg *config.Config) error {
+	proxyHandler, err := proxy.NewProxy(*cfg, &http.Client{})
 	if err != nil {
 		return err
 	}
@@ -186,20 +179,7 @@ func configureLogger(levelText, logPath string) error {
 }
 
 func configuredProviders(cfg config.Config) []string {
-	return cfg.ProviderIDs()
-}
-
-func validateConfiguredProviders(cfg config.Config, catalog map[string]proxy.ProviderCatalogEntry) error {
-	for _, providerID := range cfg.ProviderIDs() {
-		entry, ok := catalog[providerID]
-		if !ok {
-			return fmt.Errorf("provider %q has no endpoint in the catalog", providerID)
-		}
-		if entry.BaseURL == nil || entry.BaseURL.Scheme == "" || entry.BaseURL.Host == "" {
-			return fmt.Errorf("provider %q has an invalid endpoint in the catalog", providerID)
-		}
-	}
-	return nil
+	return cfg.EnabledProviderIDs()
 }
 
 type multiHandler struct {

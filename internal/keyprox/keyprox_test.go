@@ -9,13 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"keyprox/internal/proxy"
 	"keyprox/pkg/config"
 )
 
 func TestRootCmdSaveWritesDefaultConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "keyprox.yaml")
-	cmd := rootCmd(func(*config.Config, map[string]proxy.ProviderCatalogEntry) error {
+	cmd := rootCmd(func(*config.Config) error {
 		t.Fatalf("runner should not be called when --save is used")
 		return nil
 	})
@@ -30,6 +29,24 @@ func TestRootCmdSaveWritesDefaultConfig(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("os.Stat returned error: %v", err)
 	}
+
+	cfg, err := config.New(path)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if len(cfg.Provider) == 0 {
+		t.Fatalf("saved config contains no providers")
+	}
+	zai, ok := cfg.Provider["zai"]
+	if !ok {
+		t.Fatalf("saved config missing zai provider")
+	}
+	if len(zai.Endpoints) != 1 || zai.Endpoints[0] != "https://api.z.ai/api/coding/paas/v4" {
+		t.Fatalf("zai endpoints = %#v, want z.ai endpoint", zai.Endpoints)
+	}
+	if len(zai.Keys) != 0 {
+		t.Fatalf("zai keys = %#v, want empty list", zai.Keys)
+	}
 }
 
 func TestRootCmdLoadsConfigAndInvokesRunner(t *testing.T) {
@@ -41,18 +58,17 @@ runtime:
   level: info
 provider:
   zai:
-    - real-key
+    endpoints:
+      - https://api.z.ai/api/coding/paas/v4
+    keys:
+      - real-key
 `), 0o644); err != nil {
 		t.Fatalf("os.WriteFile returned error: %v", err)
 	}
 
-	var (
-		capturedConfig  *config.Config
-		capturedCatalog map[string]proxy.ProviderCatalogEntry
-	)
-	cmd := rootCmd(func(cfg *config.Config, catalog map[string]proxy.ProviderCatalogEntry) error {
+	var capturedConfig *config.Config
+	cmd := rootCmd(func(cfg *config.Config) error {
 		capturedConfig = cfg
-		capturedCatalog = catalog
 		return nil
 	})
 
@@ -69,14 +85,21 @@ provider:
 	if capturedConfig.Runtime.Listen != ":9090" {
 		t.Fatalf("Runtime.Listen = %q, want %q", capturedConfig.Runtime.Listen, ":9090")
 	}
-	if capturedCatalog == nil || len(capturedCatalog) == 0 {
-		t.Fatalf("catalog was not passed to runner")
+	provider, ok := capturedConfig.Provider["zai"]
+	if !ok {
+		t.Fatalf("captured config missing zai provider")
+	}
+	if len(provider.Endpoints) != 1 || provider.Endpoints[0] != "https://api.z.ai/api/coding/paas/v4" {
+		t.Fatalf("zai endpoints = %#v, want configured endpoint", provider.Endpoints)
+	}
+	if len(provider.Keys) != 1 || provider.Keys[0] != "real-key" {
+		t.Fatalf("zai keys = %#v, want configured key", provider.Keys)
 	}
 }
 
 func TestRootCmdReturnsInitErrorForMissingConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.yaml")
-	cmd := rootCmd(func(*config.Config, map[string]proxy.ProviderCatalogEntry) error { return nil })
+	cmd := rootCmd(func(*config.Config) error { return nil })
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"--config", path})
@@ -104,12 +127,14 @@ runtime:
   level: info
 provider:
   missing-provider:
-    - real-key
+    endpoints: []
+    keys:
+      - real-key
 `), 0o644); err != nil {
 		t.Fatalf("os.WriteFile returned error: %v", err)
 	}
 
-	cmd := rootCmd(func(*config.Config, map[string]proxy.ProviderCatalogEntry) error {
+	cmd := rootCmd(func(*config.Config) error {
 		t.Fatalf("runner should not be called when provider endpoint is missing")
 		return nil
 	})
@@ -129,7 +154,7 @@ provider:
 	if exitErr.ExitCode() != initCode {
 		t.Fatalf("exitErr.ExitCode() = %d, want %d", exitErr.ExitCode(), initCode)
 	}
-	if exitErr.Unwrap() == nil || exitErr.Unwrap().Error() != `provider "missing-provider" has no endpoint in the catalog` {
+	if exitErr.Unwrap() == nil || exitErr.Unwrap().Error() != `provider "missing-provider" must define at least one endpoint when keys are configured` {
 		t.Fatalf("err = %v, want missing endpoint error", exitErr.Unwrap())
 	}
 }
@@ -143,12 +168,15 @@ runtime:
   level: verbose
 provider:
   zai:
-    - real-key
+    endpoints:
+      - https://api.z.ai/api/coding/paas/v4
+    keys:
+      - real-key
 `), 0o644); err != nil {
 		t.Fatalf("os.WriteFile returned error: %v", err)
 	}
 
-	cmd := rootCmd(func(*config.Config, map[string]proxy.ProviderCatalogEntry) error {
+	cmd := rootCmd(func(*config.Config) error {
 		t.Fatalf("runner should not be called when log level is invalid")
 		return nil
 	})

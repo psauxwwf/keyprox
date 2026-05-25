@@ -34,5 +34,27 @@ func TestLoadCatalogUsesCatwalkProviders(t *testing.T) {
 			t.Fatalf("catalog unexpectedly contains %q", provider)
 		}
 	}
+}
 
+func TestLoadProviderDefaultsReturnsConfigShape(t *testing.T) {
+	t.Parallel()
+
+	providers, err := LoadProviderDefaults()
+	if err != nil {
+		t.Fatalf("LoadProviderDefaults returned error: %v", err)
+	}
+
+	zai, ok := providers["zai"]
+	if !ok {
+		t.Fatalf("providers missing zai")
+	}
+	if len(zai.Endpoints) != 1 || zai.Endpoints[0] != "https://api.z.ai/api/coding/paas/v4" {
+		t.Fatalf("zai endpoints = %#v, want z.ai endpoint", zai.Endpoints)
+	}
+	if len(zai.Keys) != 0 {
+		t.Fatalf("zai keys = %#v, want empty list", zai.Keys)
+	}
+	if got := providers["cerebras"].DefaultHeaders["X-Cerebras-3rd-Party-Integration"]; got != "crush" {
+		t.Fatalf("cerebras default header = %q, want %q", got, "crush")
+	}
 }

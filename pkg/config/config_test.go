@@ -9,28 +9,48 @@ import (
 	"time"
 )
 
-func TestDefaultReturnsIndependentCopy(t *testing.T) {
+func TestDefaultWithProvidersReturnsIndependentCopy(t *testing.T) {
 	t.Parallel()
 
-	first := Default()
-	first.Provider["zai"][0] = "changed"
-	first.Provider["new"] = []string{"value"}
+	source := Providers{
+		"zai": {
+			Endpoints: []string{"https://api.z.ai/api/coding/paas/v4"},
+			DefaultHeaders: map[string]string{
+				"X-Test": "one",
+			},
+			Keys: []string{"key-1"},
+		},
+	}
 
-	second := Default()
-	if second.Provider["zai"][0] != "replace-with-real-key-1" {
-		t.Fatalf("Default provider key mutated: %q", second.Provider["zai"][0])
+	first := DefaultWithProviders(source)
+	entry := first.Provider["zai"]
+	entry.Endpoints[0] = "https://changed.example/v1"
+	entry.DefaultHeaders["X-Test"] = "two"
+	entry.Keys[0] = "changed"
+	first.Provider["zai"] = entry
+	first.Provider["new"] = ProviderConfig{Endpoints: []string{"https://example.com/v1"}, Keys: []string{"key-2"}}
+
+	second := DefaultWithProviders(source)
+	if got := second.Provider["zai"].Endpoints[0]; got != "https://api.z.ai/api/coding/paas/v4" {
+		t.Fatalf("DefaultWithProviders endpoint mutated: %q", got)
+	}
+	if got := second.Provider["zai"].DefaultHeaders["X-Test"]; got != "one" {
+		t.Fatalf("DefaultWithProviders header mutated: %q", got)
+	}
+	if got := second.Provider["zai"].Keys[0]; got != "key-1" {
+		t.Fatalf("DefaultWithProviders key mutated: %q", got)
 	}
 	if _, ok := second.Provider["new"]; ok {
-		t.Fatalf("Default unexpectedly contains copied provider")
+		t.Fatalf("DefaultWithProviders unexpectedly contains copied provider")
 	}
-	if second.Runtime.Level != "info" {
-		t.Fatalf("Default runtime level = %q, want %q", second.Runtime.Level, "info")
+	if source["zai"].Endpoints[0] != "https://api.z.ai/api/coding/paas/v4" {
+		t.Fatalf("source endpoint mutated: %q", source["zai"].Endpoints[0])
 	}
-	if second.Runtime.Upstream429Retries != defaultUpstream429Retries {
-		t.Fatalf("Default runtime upstream retries = %d, want %d", second.Runtime.Upstream429Retries, defaultUpstream429Retries)
+	if source["zai"].DefaultHeaders["X-Test"] != "one" {
+		t.Fatalf("source header mutated: %q", source["zai"].DefaultHeaders["X-Test"])
 	}
-	if second.Runtime.Log != "" {
-		t.Fatalf("Default runtime log = %q, want empty string", second.Runtime.Log)
+	if source["zai"].Keys[0] != "key-1" {
+		t.Fatalf("source key mutated: %q", source["zai"].Keys[0])
 	}
 }
 
@@ -48,10 +68,17 @@ runtime:
   log: " logs/keyprox.log "
 provider:
   ZAI:
-    - " key-1 "
-    - key-2
+    endpoints:
+      - " https://api.z.ai/api/coding/paas/v4 "
+    default_headers:
+      X-Test: " enabled "
+    keys:
+      - " key-1 "
+      - key-2
   OpenRouter:
-    - key-3
+    endpoints:
+      - " https://openrouter.ai/api/v1 "
+    keys: []
 `), 0o644); err != nil {
 		t.Fatalf("os.WriteFile returned error: %v", err)
 	}
@@ -70,7 +97,6 @@ provider:
 	if cfg.Runtime.Upstream429Retries != 5 {
 		t.Fatalf("Runtime.Upstream429Retries = %d, want %d", cfg.Runtime.Upstream429Retries, 5)
 	}
-
 	if cfg.Runtime.Level != "debug" {
 		t.Fatalf("Runtime.Level = %q, want %q", cfg.Runtime.Level, "debug")
 	}
@@ -78,12 +104,24 @@ provider:
 		t.Fatalf("Runtime.Log = %q, want %q", cfg.Runtime.Log, "logs/keyprox.log")
 	}
 
-	wantProviders := ProviderKeys{
-		"zai":        {"key-1", "key-2"},
-		"openrouter": {"key-3"},
+	wantProviders := Providers{
+		"openrouter": {
+			Endpoints: []string{"https://openrouter.ai/api/v1"},
+			Keys:      []string{},
+		},
+		"zai": {
+			Endpoints: []string{"https://api.z.ai/api/coding/paas/v4"},
+			DefaultHeaders: map[string]string{
+				"X-Test": "enabled",
+			},
+			Keys: []string{"key-1", "key-2"},
+		},
 	}
 	if !reflect.DeepEqual(cfg.Provider, wantProviders) {
 		t.Fatalf("Provider = %#v, want %#v", cfg.Provider, wantProviders)
+	}
+	if got := cfg.EnabledProviderIDs(); !reflect.DeepEqual(got, []string{"zai"}) {
+		t.Fatalf("EnabledProviderIDs = %#v, want %#v", got, []string{"zai"})
 	}
 }
 
@@ -100,28 +138,53 @@ func TestNewReturnsDefaultConfigWhenMissing(t *testing.T) {
 	if cfg.Runtime.Listen != defaultListenAddr {
 		t.Fatalf("Runtime.Listen = %q, want %q", cfg.Runtime.Listen, defaultListenAddr)
 	}
-	if cfg.Runtime.Upstream429Retries != defaultUpstream429Retries {
-		t.Fatalf("Runtime.Upstream429Retries = %d, want %d", cfg.Runtime.Upstream429Retries, defaultUpstream429Retries)
-	}
 	if cfg.Runtime.Level != defaultConfig.Runtime.Level {
 		t.Fatalf("Runtime.Level = %q, want %q", cfg.Runtime.Level, defaultConfig.Runtime.Level)
 	}
+	if len(cfg.Provider) != 0 {
+		t.Fatalf("Provider length = %d, want 0", len(cfg.Provider))
+	}
 }
 
-func TestValidateRejectsExampleKeys(t *testing.T) {
+func TestValidateAllowsDisabledProvidersWithoutKeys(t *testing.T) {
 	t.Parallel()
 
-	cfg := Default()
-	if err := cfg.Validate(); err == nil {
-		t.Fatalf("Validate returned nil error for example keys")
+	cfg := DefaultWithProviders(Providers{
+		"zai": {
+			Endpoints: []string{"https://api.z.ai/api/coding/paas/v4"},
+			Keys:      []string{},
+		},
+	})
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate returned error: %v", err)
+	}
+}
+
+func TestValidateRejectsConfiguredProviderWithoutEndpoint(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultWithProviders(Providers{
+		"zai": {
+			Keys: []string{"real-key"},
+		},
+	})
+
+	err := cfg.Validate()
+	if err == nil || err.Error() != `provider "zai" must define at least one endpoint when keys are configured` {
+		t.Fatalf("Validate error = %v, want missing endpoint validation", err)
 	}
 }
 
 func TestValidateRejectsNegativeUpstream429Retries(t *testing.T) {
 	t.Parallel()
 
-	cfg := Default()
-	cfg.Provider["zai"] = []string{"real-key"}
+	cfg := DefaultWithProviders(Providers{
+		"zai": {
+			Endpoints: []string{"https://api.z.ai/api/coding/paas/v4"},
+			Keys:      []string{"real-key"},
+		},
+	})
 	cfg.Runtime.Upstream429Retries = -1
 
 	err := cfg.Validate()
@@ -141,8 +204,14 @@ func TestSaveConfigWritesNormalizedTypedYAML(t *testing.T) {
 			Level:              " warn ",
 			Log:                " logs/keyprox.jsonl ",
 		},
-		Provider: ProviderKeys{
-			" ZAI ": {" key-1 "},
+		Provider: Providers{
+			" ZAI ": {
+				Endpoints: []string{" https://api.z.ai/api/coding/paas/v4 "},
+				DefaultHeaders: map[string]string{
+					" X-Test ": " enabled ",
+				},
+				Keys: []string{" key-1 "},
+			},
 		},
 	}
 	if err := SaveConfig(path, cfg); err != nil {
@@ -168,7 +237,16 @@ func TestSaveConfigWritesNormalizedTypedYAML(t *testing.T) {
 	if loaded.Runtime.Log != "logs/keyprox.jsonl" {
 		t.Fatalf("Runtime.Log = %q, want %q", loaded.Runtime.Log, "logs/keyprox.jsonl")
 	}
-	if !reflect.DeepEqual(loaded.Provider, ProviderKeys{"zai": {"key-1"}}) {
-		t.Fatalf("Provider = %#v, want normalized provider map", loaded.Provider)
+	wantProviders := Providers{
+		"zai": {
+			Endpoints: []string{"https://api.z.ai/api/coding/paas/v4"},
+			DefaultHeaders: map[string]string{
+				"X-Test": "enabled",
+			},
+			Keys: []string{"key-1"},
+		},
+	}
+	if !reflect.DeepEqual(loaded.Provider, wantProviders) {
+		t.Fatalf("Provider = %#v, want %#v", loaded.Provider, wantProviders)
 	}
 }

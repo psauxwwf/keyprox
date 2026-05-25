@@ -16,11 +16,16 @@ import (
 )
 
 type Proxy struct {
-	catalog            map[string]ProviderCatalogEntry
-	keys               map[string][]string
+	providers          map[string]providerConfig
 	client             *http.Client
 	upstream429Retries int
 	counters           sync.Map
+}
+
+type providerConfig struct {
+	target         *url.URL
+	defaultHeaders map[string]string
+	keys           []string
 }
 
 type providerCounter struct {
@@ -44,6 +49,7 @@ func (w *statusCapturingResponseWriter) Write(body []byte) (int, error) {
 	}
 	return w.ResponseWriter.Write(body)
 }
+
 func (w *statusCapturingResponseWriter) Flush() {
 	if w.status == 0 {
 		w.status = http.StatusOK
@@ -60,27 +66,35 @@ func (w *statusCapturingResponseWriter) StatusCode() int {
 	return w.status
 }
 
-func NewProxy(cfg config.Config, catalog map[string]ProviderCatalogEntry, client *http.Client) (*Proxy, error) {
+func NewProxy(cfg config.Config, client *http.Client) (*Proxy, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
 
-	keys := make(map[string][]string, len(cfg.Provider))
-	for provider, providerKeys := range cfg.Provider {
-		entry, ok := catalog[provider]
-		if !ok {
-			return nil, fmt.Errorf("provider %q is configured but is not available in the catalog", provider)
+	providers := make(map[string]providerConfig, len(cfg.Provider))
+	for providerID, provider := range cfg.Provider {
+		runtimeProvider := providerConfig{
+			defaultHeaders: cloneStringMap(provider.DefaultHeaders),
+			keys:           append([]string(nil), provider.Keys...),
 		}
-		if entry.BaseURL == nil || entry.BaseURL.Scheme == "" || entry.BaseURL.Host == "" {
-			return nil, fmt.Errorf("provider %q has invalid endpoint", provider)
+		if len(provider.Keys) > 0 {
+			if len(provider.Endpoints) == 0 {
+				return nil, fmt.Errorf("provider %q must define at least one endpoint when keys are configured", providerID)
+			}
+
+			entry, err := newProviderCatalogEntry(provider.Endpoints[0], provider.DefaultHeaders)
+			if err != nil {
+				return nil, fmt.Errorf("provider %q endpoint %q: %w", providerID, provider.Endpoints[0], err)
+			}
+			runtimeProvider.target = entry.BaseURL
+			runtimeProvider.defaultHeaders = entry.DefaultHeaders
 		}
 
-		keys[provider] = append(keys[provider], providerKeys...)
+		providers[providerID] = runtimeProvider
 	}
 
 	return &Proxy{
-		catalog:            catalog,
-		keys:               keys,
+		providers:          providers,
 		client:             client,
 		upstream429Retries: cfg.Runtime.Upstream429Retries,
 	}, nil
@@ -133,19 +147,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry, ok := p.catalog[provider]
+	providerConfig, ok := p.providers[provider]
 	if !ok {
-		writeProxyError(w, http.StatusBadRequest, fmt.Sprintf("provider %q is not available in the catalog", provider))
+		writeProxyError(w, http.StatusBadRequest, fmt.Sprintf("provider %q is not available in the config", provider))
 		return
 	}
-
-	keys, ok := p.keys[provider]
-	if !ok {
+	if len(providerConfig.keys) == 0 {
 		writeProxyError(w, http.StatusBadRequest, fmt.Sprintf("provider %q is not configured", provider))
 		return
 	}
+	if providerConfig.target == nil {
+		writeProxyError(w, http.StatusBadRequest, fmt.Sprintf("provider %q has no endpoint configured", provider))
+		return
+	}
 
-	target = buildTargetURL(entry.BaseURL, r.URL)
+	target = buildTargetURL(providerConfig.target, r.URL)
 	slog.Info("proxy request",
 		"provider", provider,
 		"method", r.Method,
@@ -160,9 +176,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		copyRequestHeaders(outbound.Header, r.Header)
-		applyDefaultHeaders(outbound.Header, entry.DefaultHeaders)
+		applyDefaultHeaders(outbound.Header, providerConfig.defaultHeaders)
 		outbound.ContentLength = int64(len(rewrittenBody))
-		outbound.Header.Set("Authorization", "Bearer "+p.nextKey(provider, keys))
+		outbound.Header.Set("Authorization", "Bearer "+p.nextKey(provider, providerConfig.keys))
 
 		response, err := p.client.Do(outbound)
 		if err != nil {

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -59,21 +58,8 @@ func TestProxyRoundRobinUsesNextKeyPerRequest(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	baseURL := mustParseURL(t, upstream.URL+"/api/paas/v4")
-	catalog := map[string]ProviderCatalogEntry{
-		"zhipu": {
-			BaseURL: baseURL,
-			DefaultHeaders: map[string]string{
-				"X-Provider-Default": "enabled",
-			},
-		},
-	}
-
-	proxy, err := NewProxy(config.Config{
-		Provider: config.ProviderKeys{
-			"zhipu": {"key-1", "key-2"},
-		},
-	}, catalog, upstream.Client())
+	cfg := proxyConfig("zhipu", upstream.URL+"/api/paas/v4", []string{"key-1", "key-2"}, map[string]string{"X-Provider-Default": "enabled"})
+	proxy, err := NewProxy(cfg, upstream.Client())
 	if err != nil {
 		t.Fatalf("NewProxy returned error: %v", err)
 	}
@@ -127,15 +113,7 @@ func TestProxyRoundRobinUsesNextKeyPerRequest(t *testing.T) {
 func TestProxyRejectsMissingProviderPrefix(t *testing.T) {
 	t.Parallel()
 
-	proxy, err := NewProxy(config.Config{
-		Provider: config.ProviderKeys{
-			"zai": {"key-1"},
-		},
-	}, map[string]ProviderCatalogEntry{
-		"zai": {
-			BaseURL: mustParseURL(t, "https://api.z.ai/api/coding/paas/v4"),
-		},
-	}, http.DefaultClient)
+	proxy, err := NewProxy(proxyConfig("zai", "https://api.z.ai/api/coding/paas/v4", []string{"key-1"}, nil), http.DefaultClient)
 	if err != nil {
 		t.Fatalf("NewProxy returned error: %v", err)
 	}
@@ -154,6 +132,7 @@ func TestProxyRejectsMissingProviderPrefix(t *testing.T) {
 		t.Fatalf("body = %q, want provider/model format error", body)
 	}
 }
+
 func TestProxyLogsResponseStatusCode(t *testing.T) {
 	logs := captureProxyLogs(t)
 
@@ -170,15 +149,7 @@ func TestProxyLogsResponseStatusCode(t *testing.T) {
 		}),
 	}
 
-	proxy, err := NewProxy(config.Config{
-		Provider: config.ProviderKeys{
-			"zai": {"key-1"},
-		},
-	}, map[string]ProviderCatalogEntry{
-		"zai": {
-			BaseURL: mustParseURL(t, "https://api.z.ai/api/coding/paas/v4"),
-		},
-	}, client)
+	proxy, err := NewProxy(proxyConfig("zai", "https://api.z.ai/api/coding/paas/v4", []string{"key-1"}, nil), client)
 	if err != nil {
 		t.Fatalf("NewProxy returned error: %v", err)
 	}
@@ -208,15 +179,7 @@ func TestProxyLogsResponseStatusCode(t *testing.T) {
 func TestProxyLogsRejectedRequestStatusCode(t *testing.T) {
 	logs := captureProxyLogs(t)
 
-	proxy, err := NewProxy(config.Config{
-		Provider: config.ProviderKeys{
-			"zai": {"key-1"},
-		},
-	}, map[string]ProviderCatalogEntry{
-		"zai": {
-			BaseURL: mustParseURL(t, "https://api.z.ai/api/coding/paas/v4"),
-		},
-	}, http.DefaultClient)
+	proxy, err := NewProxy(proxyConfig("zai", "https://api.z.ai/api/coding/paas/v4", []string{"key-1"}, nil), http.DefaultClient)
 	if err != nil {
 		t.Fatalf("NewProxy returned error: %v", err)
 	}
@@ -241,6 +204,7 @@ func TestProxyLogsRejectedRequestStatusCode(t *testing.T) {
 		t.Fatalf("logs = %q, want response status", logText)
 	}
 }
+
 func TestProxyRetries429WithNextKeyAndLogsTransition(t *testing.T) {
 	logs := captureProxyLogs(t)
 
@@ -267,18 +231,9 @@ func TestProxyRetries429WithNextKeyAndLogsTransition(t *testing.T) {
 		}),
 	}
 
-	proxy, err := NewProxy(config.Config{
-		Runtime: config.Runtime{
-			Upstream429Retries: 1,
-		},
-		Provider: config.ProviderKeys{
-			"zai": {"key-1", "key-2"},
-		},
-	}, map[string]ProviderCatalogEntry{
-		"zai": {
-			BaseURL: mustParseURL(t, "https://api.z.ai/api/coding/paas/v4"),
-		},
-	}, client)
+	cfg := proxyConfig("zai", "https://api.z.ai/api/coding/paas/v4", []string{"key-1", "key-2"}, nil)
+	cfg.Runtime.Upstream429Retries = 1
+	proxy, err := NewProxy(cfg, client)
 	if err != nil {
 		t.Fatalf("NewProxy returned error: %v", err)
 	}
@@ -335,18 +290,9 @@ func TestProxyStopsRetryingAfterConfigured429Limit(t *testing.T) {
 		}),
 	}
 
-	proxy, err := NewProxy(config.Config{
-		Runtime: config.Runtime{
-			Upstream429Retries: 1,
-		},
-		Provider: config.ProviderKeys{
-			"zai": {"key-1", "key-2", "key-3"},
-		},
-	}, map[string]ProviderCatalogEntry{
-		"zai": {
-			BaseURL: mustParseURL(t, "https://api.z.ai/api/coding/paas/v4"),
-		},
-	}, client)
+	cfg := proxyConfig("zai", "https://api.z.ai/api/coding/paas/v4", []string{"key-1", "key-2", "key-3"}, nil)
+	cfg.Runtime.Upstream429Retries = 1
+	proxy, err := NewProxy(cfg, client)
 	if err != nil {
 		t.Fatalf("NewProxy returned error: %v", err)
 	}
@@ -370,6 +316,7 @@ func TestProxyStopsRetryingAfterConfigured429Limit(t *testing.T) {
 		t.Fatalf("second Authorization = %q, want %q", authorizations[1], "Bearer key-2")
 	}
 }
+
 func TestStatusCapturingResponseWriterPreservesFlush(t *testing.T) {
 	recorder := &flushCountingResponseWriter{ResponseRecorder: httptest.NewRecorder()}
 	writer := &statusCapturingResponseWriter{ResponseWriter: recorder}
@@ -384,6 +331,7 @@ func TestStatusCapturingResponseWriterPreservesFlush(t *testing.T) {
 		t.Fatalf("StatusCode() = %d, want %d", writer.StatusCode(), http.StatusOK)
 	}
 }
+
 func TestProxyPreservesJSONErrorContentTypeWithoutUpstreamHeader(t *testing.T) {
 	t.Parallel()
 
@@ -399,15 +347,7 @@ func TestProxyPreservesJSONErrorContentTypeWithoutUpstreamHeader(t *testing.T) {
 		}),
 	}
 
-	proxy, err := NewProxy(config.Config{
-		Provider: config.ProviderKeys{
-			"zai": {"key-1"},
-		},
-	}, map[string]ProviderCatalogEntry{
-		"zai": {
-			BaseURL: mustParseURL(t, "https://api.z.ai/api/coding/paas/v4"),
-		},
-	}, client)
+	proxy, err := NewProxy(proxyConfig("zai", "https://api.z.ai/api/coding/paas/v4", []string{"key-1"}, nil), client)
 	if err != nil {
 		t.Fatalf("NewProxy returned error: %v", err)
 	}
@@ -435,15 +375,6 @@ func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 	return fn(req)
 }
 
-func mustParseURL(t *testing.T, raw string) *url.URL {
-	t.Helper()
-
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("url.Parse returned error: %v", err)
-	}
-	return parsed
-}
 func captureProxyLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 
@@ -454,6 +385,18 @@ func captureProxyLogs(t *testing.T) *bytes.Buffer {
 		slog.SetDefault(previous)
 	})
 	return &buffer
+}
+
+func proxyConfig(providerID, endpoint string, keys []string, defaultHeaders map[string]string) config.Config {
+	return config.Config{
+		Provider: config.Providers{
+			providerID: {
+				Endpoints:      []string{endpoint},
+				DefaultHeaders: defaultHeaders,
+				Keys:           append([]string(nil), keys...),
+			},
+		},
+	}
 }
 
 type flushCountingResponseWriter struct {
